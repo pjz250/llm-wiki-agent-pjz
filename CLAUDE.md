@@ -325,17 +325,3 @@ grep "^## \[" wiki/log.md | tail -10
 ```
 
 操作类型：`ingest`（收录）、`query`（查询）、`health`（健康检查）、`lint`（代码检查）、`graph`（图谱构建）、`daemon`（守护进程）
-
-
-
-# 单本书
-python tools/pipeline.py raw/人类思想型/纯粹理性批判.md
-
-# 整分类
-python tools/pipeline.py raw/方法实践型/
-
-# 全部
-python tools/pipeline.py raw/
-
-# 跳过收录，只做萃取
-python tools/pipeline.py raw/方法实践型/搞定GTD.md --skip-ingest-book
