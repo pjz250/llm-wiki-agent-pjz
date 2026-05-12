@@ -340,7 +340,7 @@ def all_wiki_pages() -> set[str]:
     """返回所有 wiki 页面的文件名（小写，不含扩展名）的集合。"""
     pages = set()
     for p in WIKI_DIR.rglob("*.md"):
-        if p.name not in ("index.md", "log.md", "lint-report.md"):
+        if p.name not in ("index.md", "log.md", "lint-report.md", "health-report.md"):
             pages.add(p.stem.lower())
     return pages
 
@@ -369,7 +369,7 @@ def validate_ingest(changed_pages: list[str] | None = None) -> dict:
     else:
         scan_paths = [
             p for p in WIKI_DIR.rglob("*.md")
-            if p.name not in ("index.md", "log.md", "lint-report.md")
+            if p.name not in ("index.md", "log.md", "lint-report.md", "health-report.md")
         ]
 
     # 检查 1：断裂的维基链接
@@ -389,10 +389,141 @@ def validate_ingest(changed_pages: list[str] | None = None) -> dict:
         page_path = WIKI_DIR / p
         if page_path.exists():
             stem = page_path.stem.lower()
-            if stem not in index_content and p not in ("log.md", "overview.md"):
+            if stem not in index_content and p not in ("log.md", "overview.md", "health-report.md"):
                 unindexed.append(p)
 
     return {"broken_links": broken_links, "unindexed": unindexed}
+
+
+def _collect_context_for_link(link_name: str, all_pages: list[Path] | None = None, max_chars: int = 1500) -> str:
+    """
+    收集某个断裂链接在现有 wiki 页面中被提及的上下文。
+
+    参数：
+        link_name: 断裂的维基链接名称
+        all_pages: 要搜索的页面列表（默认所有页面）
+        max_chars: 上下文总字符数上限
+
+    返回：
+        拼接后的上下文字符串
+    """
+    if all_pages is None:
+        all_pages = [p for p in WIKI_DIR.rglob("*.md")
+                     if p.name not in ("index.md", "log.md", "lint-report.md", "health-report.md")]
+
+    context_parts = []
+    total = 0
+    for p in all_pages:
+        content = read_file(p)
+        if link_name.lower() not in content.lower():
+            continue
+        rel = p.relative_to(WIKI_DIR)
+        snippet = content[:1200]
+        context_parts.append(f"### {rel}\n{snippet}")
+        total += len(snippet)
+        if total > max_chars:
+            break
+
+    return "\n\n".join(context_parts) if context_parts else f"（没有找到「{link_name}」的上下文信息）"
+
+
+def auto_heal_broken_links(broken_links: list[tuple[str, str]], created_pages: list[str]) -> list[str]:
+    """
+    对收录后产生的断裂 [[链接]] 自动调用 AI 补齐缺失页面。
+
+    参数：
+        broken_links: [(源页面相对路径, 断裂链接名), ...]
+        created_pages: 本次收录创建的页面路径列表
+
+    返回：
+        newly_created: 新创建的页面路径列表（用于后续验证）
+    """
+    if not broken_links:
+        return []
+
+    # 收集不重复的断裂链接目标
+    existing = all_wiki_pages()
+    unique_targets = sorted(set(link for _, link in broken_links))
+
+    # 过滤：已经存在的跳过、来自页面自身关联的跳过（避免重复创建）
+    to_heal = [t for t in unique_targets if t.lower() not in existing]
+    if not to_heal:
+        return []
+
+    # 预扫描所有 wiki 页面（只做一次）
+    all_wiki_paths = [p for p in WIKI_DIR.rglob("*.md")
+                      if p.name not in ("index.md", "log.md", "lint-report.md", "health-report.md")]
+
+    today = date.today().isoformat()
+    newly_created = []
+
+    for link_name in to_heal:
+        context = _collect_context_for_link(link_name, all_wiki_paths)
+
+        prompt = f"""你正在补充一个中文个人知识维基中缺失的数据。
+「{link_name}」被其他页面通过 [[{link_name}]] 引用，但还没有自己的独立页面。
+
+请判断「{link_name}」应该是什么类型的页面：
+- **entity**（实体）：人物、公司、项目、产品等具体对象
+- **concept**（概念）：思想、框架、方法论、理论等抽象对象
+
+以下是引用「{link_name}」的页面上下文：
+{context}
+
+请严格按以下 JSON 格式输出，不要包含其他文字：
+{{
+  "type": "entity 或 concept",
+  "page_type_label": "实体" 或 "概念",
+  "content": "完整的 Markdown 页面内容，以 YAML frontmatter 开头，正文全部用中文，末尾用 [[关联页面]] 做链接"
+}}
+
+要求：
+1. frontmatter 格式：
+   ---
+   title: "{link_name}"
+   type: 填 entity 或 concept
+   tags: []
+   sources: []
+   last_updated: {today}
+   ---
+2. 正文开头用 **{link_name}**（加粗），然后写一段完整的定义
+3. 末尾用 "---" 分隔，然后写 "关联：" 并加上 [[相关链接]]
+4. 只输出 JSON，不要 Markdown 代码块
+5. 内容长度控制在 300-800 字之间
+"""
+        try:
+            raw = call_llm(prompt, max_tokens=2048)
+            result = parse_json_from_response(raw)
+            page_type = result.get("type", "concept")
+            content = result.get("content", "")
+
+            if not content:
+                print(f"    AI 未能生成内容，跳过")
+                continue
+
+            # 决定保存路径
+            if page_type == "entity":
+                target_dir = WIKI_DIR / "entities"
+                index_section = "实体"
+            else:
+                target_dir = WIKI_DIR / "concepts"
+                index_section = "概念"
+
+            target = target_dir / f"{link_name}.md"
+            if target.exists():
+                print(f"    页面已存在，跳过：{target.relative_to(REPO_ROOT)}")
+                continue
+
+            write_file(target, content)
+            title = extract_title_from_markdown(content) or link_name
+            rel_path = str(target.relative_to(WIKI_DIR))
+            update_index(f"- [{title}]({rel_path})", section=index_section)
+            newly_created.append(rel_path)
+            print(f"    + 自动创建缺失页面：{rel_path} （{result.get('page_type_label', page_type)}）")
+        except Exception as e:
+            print(f"    [!] 为「{link_name}」生成页面失败：{e}")
+
+    return newly_created
 
 
 def convert_to_md(source: Path) -> Path:
@@ -576,7 +707,7 @@ def ingest(source_path: str, auto_convert: bool = True):
         for c in contradictions:
             print(f"     - {c}")
 
-    # ---- 收录后验证 ----
+    # ---- 收录后验证与自动修复断裂链接 ----
     created_pages = [f"sources/{slug}.md"]
     for page in data.get("entity_pages", []):
         created_pages.append(page["path"])
@@ -584,7 +715,17 @@ def ingest(source_path: str, auto_convert: bool = True):
         created_pages.append(page["path"])
     updated_pages = ["index.md", "log.md", "overview.md"]
 
-    validation = validate_ingest(created_pages)
+    validation = validate_ingest()  # 扫描所有页面，捕获全部断裂链接
+
+    # ---- 自动修复断裂链接 ----
+    healed_pages = []
+    if validation["broken_links"]:
+        print(f"\n  🔧 检测到 {len(validation['broken_links'])} 处断裂链接，正在自动修复...")
+        healed_pages = auto_heal_broken_links(validation["broken_links"], created_pages)
+        if healed_pages:
+            created_pages.extend(healed_pages)
+            # 修复后重新验证
+            validation = validate_ingest()  # 重新扫描全部页面
 
     # ---- 打印变更摘要 ----
     print(f"\n{'='*50}")
@@ -593,25 +734,29 @@ def ingest(source_path: str, auto_convert: bool = True):
     print(f"  创建了 {len(created_pages)} 个页面：")
     for p in created_pages:
         print(f"           + wiki/{p}")
+    if healed_pages:
+        print(f"    其中 {len(healed_pages)} 个为自动修复的缺失页面")
     print(f"  更新了 {len(updated_pages)} 个页面：")
     for p in updated_pages:
         print(f"           ~ wiki/{p}")
     if contradictions:
         print(f"  警告：{len(contradictions)} 处矛盾")
     if validation["broken_links"]:
-        print(f"  ⚠️  断裂链接：{len(validation['broken_links'])} 处")
+        print(f"  ⚠️  仍存在 {len(validation['broken_links'])} 处断裂链接（自动修复无法覆盖）：")
         for page, link in validation["broken_links"][:10]:
             print(f"           wiki/{page} → [[{link}]]")
         if len(validation["broken_links"]) > 10:
             print(f"           ... 还有 {len(validation['broken_links']) - 10} 处")
+    else:
+        print("  ✓ 所有链接已修复 —— 没有断裂链接")
     if validation["unindexed"]:
         print(f"  ⚠️  未注册到索引：{len(validation['unindexed'])} 个")
         for p in validation["unindexed"][:10]:
             print(f"           wiki/{p}")
         if len(validation["unindexed"]) > 10:
             print(f"           ... 还有 {len(validation['unindexed']) - 10} 个")
-    if not validation["broken_links"] and not validation["unindexed"]:
-        print("  ✓ 验证通过 —— 没有断裂链接，所有页面已注册到索引")
+    else:
+        print("  ✓ 所有页面已注册到索引")
     print()
 
 
@@ -636,7 +781,7 @@ if __name__ == "__main__":
         index_content = read_file(INDEX_FILE).lower()
         unindexed_all = []
         for p in WIKI_DIR.rglob("*.md"):
-            if p.name in ("index.md", "log.md", "lint-report.md", "overview.md"):
+            if p.name in ("index.md", "log.md", "lint-report.md", "health-report.md", "overview.md"):
                 continue
             if p.stem.lower() not in index_content:
                 unindexed_all.append(str(p.relative_to(WIKI_DIR)))

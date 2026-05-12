@@ -101,12 +101,15 @@ def search_sources(entity: str, pages: list[Path]) -> list[Path]:
     """
     sources = []
     for p in pages:
-        # 跳过 entities/ 和 concepts/ 目录下的页面
-        if "entities" not in str(p.parent) and "concepts" not in str(p.parent):
-            content = p.read_text(encoding="utf-8")
-            # 大小写不敏感地搜索实体名称
-            if entity.lower() in content.lower():
-                sources.append(p)
+        # 只搜索 sources/（资料页）和 concepts/（概念页），
+        # 不搜索 entities/ 目录（因为实体页自身并不提供有用的上下文）。
+        parent = str(p.parent)
+        if "entities" in parent:
+            continue
+        content = p.read_text(encoding="utf-8")
+        # 大小写不敏感地搜索实体名称
+        if entity.lower() in content.lower():
+            sources.append(p)
     # 最多返回 15 个页面，避免上下文溢出
     return sources[:15]
 

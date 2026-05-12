@@ -328,10 +328,10 @@ def format_report(results: dict) -> str:
         lines.append("| 页面 | 总大小 | 正文大小 | 状态 |")
         lines.append("|---|---|---|---|")
         for ef in empty:
-            emoji = "🔴" if ef["status"] == "empty" else "🟡"
-            lines.append(f"| `{ef['path']}` | {ef['total_bytes']} | {ef['body_bytes']} | {emoji} {ef['status']} |")
+            marker = "[EMPTY]" if ef["status"] == "empty" else "[STUB]"
+            lines.append(f"| `{ef['path']}` | {ef['total_bytes']} | {ef['body_bytes']} | {marker} {ef['status']} |")
     else:
-        lines.append("所有页面都有 frontmatter 之外的实质内容。✅")
+        lines.append("所有页面都有 frontmatter 之外的实质内容。[OK]")
     lines.append("")
 
     # ---- 索引同步 ----
@@ -355,7 +355,7 @@ def format_report(results: dict) -> str:
         lines.append("")
 
     if not stale and not missing:
-        lines.append("index.md 与磁盘文件完全同步。✅")
+        lines.append("index.md 与磁盘文件完全同步。[OK]")
         lines.append("")
 
     # ---- 日志覆盖 ----
@@ -368,7 +368,7 @@ def format_report(results: dict) -> str:
         for lm in log_missing:
             lines.append(f"- `{lm['path']}` — {lm['title']}")
     else:
-        lines.append("所有资料页都有对应的日志条目。✅")
+        lines.append("所有资料页都有对应的日志条目。[OK]")
     lines.append("")
 
     return "\n".join(lines)
